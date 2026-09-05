@@ -178,6 +178,51 @@ scripts/package-machine-images.sh \
 `BUILDROOT_OUTPUT` is the directory containing `images/`, not the `images/`
 directory itself. Upload both generated files to the matching GitHub Release.
 
+## Validate pull requests
+
+Pull requests targeting `main` run the `Validate pull request` workflow when
+opened, reopened, or updated. It checks the merge commit against its base
+branch parent and selects builds independently of published release manifests:
+
+- changes inside `machine/<architecture>/<machine>/` build that machine,
+  including metadata, patches, finalizers, and launcher changes;
+- changes to shared inputs, such as `scripts/`, `.github/`, `VERSION`, and
+  `.dockerignore`, build all machines; unknown paths outside machine
+  directories also build all machines;
+- changes limited to `README.md`, `docs/`, license files, or `.gitignore`
+  skip image builds;
+- newly added or renamed machines are built, fully removed machines are
+  skipped, and machines missing `build.hcl` or `machine.conf` fail validation.
+
+PR and release builds call the same reusable `build-machine.yml` workflow.
+Each selected machine runs Docker Bake, image assembly, finalization, and
+packaging, including validation of every file in `REQUIRED_IMAGES`. Archives
+and SHA-256 files are available for seven days in Actions artifacts named
+`pr-<number>-<release-asset-prefix>`. PR builds use read-only repository
+permissions and do not publish Releases or update tags.
+
+Script tests and version validation run even when no images need rebuilding.
+The final `PR image build` check succeeds only when preparation and all
+selected builds succeed, or preparation confirms that no builds are needed.
+Add this check to the `main` branch protection rule or ruleset as a required
+status check to block merging failed builds. The workflow has no path filter,
+so documentation-only PRs can still complete this required check.
+
+Fork PRs use the `pull_request` event without repository secrets. Depending
+on the repository's Actions settings, GitHub may require a maintainer to
+approve a first-time contributor's workflow run. See
+[GitHub's fork workflow settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+
+Run the selection and release-manifest regression tests locally with:
+
+```console
+tests/select-pr-machines.sh
+tests/release-manifest.sh
+```
+
+PR validation does not replace the `BUILD_REVISION` update required for
+release-affecting changes outside `build.hcl`.
+
 ## Publish a release
 
 Push relevant image changes to `main` to start the release workflow:

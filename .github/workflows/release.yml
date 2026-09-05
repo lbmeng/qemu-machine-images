@@ -199,126 +199,14 @@ jobs:
     name: Build ${{ matrix.machine_dir }}
     needs: prepare
     if: needs.prepare.outputs.has_builds == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         machine_dir: ${{ fromJSON(needs.prepare.outputs.machine_matrix) }}
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Load machine metadata
-        id: machine
-        env:
-          MACHINE_DIR: ${{ matrix.machine_dir }}
-        run: |
-          set -euo pipefail
-
-          source "${MACHINE_DIR}/machine.conf"
-          : "${RELEASE_ASSET_PREFIX:?RELEASE_ASSET_PREFIX is required}"
-
-          if ! declare -p REQUIRED_IMAGES 2>/dev/null | grep -q '^declare -a '; then
-              echo "REQUIRED_IMAGES must be an indexed array" >&2
-              exit 1
-          fi
-          if (( ${#REQUIRED_IMAGES[@]} == 0 )); then
-              echo "REQUIRED_IMAGES must not be empty" >&2
-              exit 1
-          fi
-
-          if [[ ! "${RELEASE_ASSET_PREFIX}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
-              echo "invalid release asset prefix: ${RELEASE_ASSET_PREFIX}" >&2
-              exit 1
-          fi
-          for image in "${REQUIRED_IMAGES[@]}"; do
-              case "${image}" in
-                  ""|/*|.|..|../*|*/./*|*/../*|*/.|*/..)
-                      echo "invalid required image path: ${image}" >&2
-                      exit 1
-                      ;;
-              esac
-          done
-
-          echo "asset_prefix=${RELEASE_ASSET_PREFIX}" >> "${GITHUB_OUTPUT}"
-
-      - name: Reclaim runner disk space
-        run: |
-          set -euo pipefail
-
-          df -h /
-          sudo rm -rf -- \
-              /opt/ghc \
-              /opt/hostedtoolcache/CodeQL \
-              /usr/local/.ghcup \
-              /usr/local/lib/android \
-              /usr/share/dotnet \
-              /usr/share/swift
-          sudo apt-get clean
-          docker system prune --all --force
-          df -h /
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build machine components
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: false
-        with:
-          source: .
-          files: |
-            scripts/docker-bake.hcl
-            ${{ matrix.machine_dir }}/build.hcl
-          targets: release-components
-
-      - name: Report disk space after build
-        if: always()
-        run: df -h /
-
-      - name: Assemble machine images
-        run: scripts/assemble-machine-images.sh components output
-
-      - name: Install image tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gdisk zstd
-
-      - name: Finalize machine images
-        env:
-          MACHINE_DIR: ${{ matrix.machine_dir }}
-        run: scripts/finalize-machine-images.sh "${MACHINE_DIR}" output/images
-
-      - name: Package release asset
-        id: package
-        env:
-          MACHINE_DIR: ${{ matrix.machine_dir }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-
-          asset="$(
-              scripts/package-machine-images.sh \
-                  "${MACHINE_DIR}/machine.conf" \
-                  output \
-                  dist \
-                  "${RELEASE_TAG}"
-          )"
-
-          echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
-
-      - name: Upload release candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-${{ steps.machine.outputs.asset_prefix }}
-          path: |
-            dist/${{ steps.package.outputs.asset }}
-            dist/${{ steps.package.outputs.asset }}.sha256
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+    uses: ./.github/workflows/build-machine.yml
+    with:
+      machine_dir: ${{ matrix.machine_dir }}
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
 
   release:
     name: Publish GitHub Release

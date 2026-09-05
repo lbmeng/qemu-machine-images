@@ -1,0 +1,105 @@
+name: Validate pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pull-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare PR validation
+    runs-on: ubuntu-24.04
+    outputs:
+      machine_matrix: ${{ steps.machines.outputs.machine_matrix }}
+      has_builds: ${{ steps.machines.outputs.has_builds }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run script tests
+        run: |
+          tests/select-pr-machines.sh
+          tests/release-manifest.sh
+
+      - name: Validate version
+        id: version
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "${version}" =~ \
+              ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "VERSION is not a semantic version: ${version}" >&2
+              exit 1
+          fi
+          echo "release_tag=v${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Select affected machines
+        id: machines
+        run: |
+          set -euo pipefail
+
+          # Compare the merge result with its base branch parent
+          machine_matrix="$(
+              scripts/select-pr-machines.sh "${GITHUB_WORKSPACE}" HEAD^1 HEAD
+          )"
+          has_builds=false
+          if (( $(jq --raw-output 'length' <<< "${machine_matrix}") > 0 )); then
+              has_builds=true
+          fi
+
+          echo "selected machine builds: ${machine_matrix}"
+          echo "machine_matrix=${machine_matrix}" >> "${GITHUB_OUTPUT}"
+          echo "has_builds=${has_builds}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Validate ${{ matrix.machine_dir }}
+    needs: prepare
+    if: needs.prepare.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        machine_dir: ${{ fromJSON(needs.prepare.outputs.machine_matrix) }}
+    uses: ./.github/workflows/build-machine.yml
+    with:
+      machine_dir: ${{ matrix.machine_dir }}
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      artifact_prefix: pr-${{ github.event.pull_request.number }}
+
+  check:
+    name: PR image build
+    needs:
+      - prepare
+      - build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check validation results
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          HAS_BUILDS: ${{ needs.prepare.outputs.has_builds }}
+        run: |
+          set -euo pipefail
+
+          [[ "${PREPARE_RESULT}" == success ]] || exit 1
+          if [[ "${HAS_BUILDS}" == true ]]; then
+              [[ "${BUILD_RESULT}" == success ]] || exit 1
+              echo "All selected machine images were built and packaged"
+          else
+              [[ "${HAS_BUILDS}" == false &&
+                 "${BUILD_RESULT}" == skipped ]] || exit 1
+              echo "No machine image builds were needed"
+          fi
